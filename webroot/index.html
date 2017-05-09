@@ -1,0 +1,130 @@
+<html><head><title>System Info</title>
+<meta http-equiv='Content-Type' content='text/html;charset=utf-8'>
+<script src ='https://cdn.bootcss.com/Chart.js/2.5.0/Chart.bundle.min.js'>
+</script>
+</head>
+<body>
+  <H1>System Info</H1>
+  <table>
+    <tr>
+      <td><canvas id="cpu" width="400" height="400"></canvas></td>
+      <td><canvas id="mem" width="400" height="400"></canvas></td>
+    </tr>
+    <tr>
+      <td><canvas id="net" width="400" height="400"></canvas></td>
+      <td><canvas id="ios" width="400" height="400"></canvas></td>
+    </tr>
+  </table>
+  <script>
+  var metrics = ['cpu', 'mem', 'net', 'ios'];
+  var counter = 0;
+  var datagroups = {
+    "cpu": [
+      {label: "CPU-idle", backgroundColor: "rgba(75,192,192,0.4)", borderColor: "rgba(75,192,192,1)"},
+      {label: "CPU-user", backgroundColor: "rgba(255,020,147,0.4)", borderColor: "rgba(199,21,133,1)"},
+      {label: "CPU-system", backgroundColor: "rgba(250,128,114,0.4)", borderColor: "rgba(178,34,34,1)"}
+    ],
+    "mem": [
+      {label: "MEM-free", backgroundColor: "rgba(75,192,192,0.4)", borderColor: "rgba(75,192,192,1)"}
+    ],
+    "net": [
+      {label: "NET-recv", backgroundColor: "rgba(238,130,238,0.4)", borderColor: "rgba(138,43,226,1)"},
+      {label: "NET-send", backgroundColor: "rgba(75,192,192,0.4)", borderColor: "rgba(75,192,192,1)"}
+    ],
+    "ios": [
+      {label: "DISK-read", backgroundColor: "rgba(192,255,062,0.4)", borderColor: "rgba(000,139,000,1)"},
+      {label: "DISK-write", backgroundColor: "rgba(75,192,192,0.4)", borderColor: "rgba(75,192,192,1)"}
+    ],
+  };
+  function appendDataTo(dataset, label, key, value) {
+    for (var i = 0; i < dataset.length; i++) {
+      var item = dataset[i];
+      if (item.label == label) {
+        item.data.push({x: key, y: value});
+        if (item.data.length > 10) {
+          item.data.shift();
+        }//end if
+      }//endif
+    }//next
+  }//end getIndexOf
+
+  var charts = [];
+
+  function url(api) {
+    return 'http://' + window.location.host + '/' + api;
+  }//end function
+
+  function setup(api) {
+    var ctx = document.getElementById(api).getContext("2d");
+    return new Chart(ctx, {
+      type: 'line',
+      data: {  datasets: datagroups[api]   },
+      options: {
+          scales: {
+              xAxes: [{
+                  type: 'linear',
+                  position: 'bottom'
+              }]
+          }
+      }
+    });
+  }//end setup
+  metrics.forEach( function (api) {
+    charts[api] = setup(api);
+  });
+  function update(api){
+    fetch(url(api),{method: 'get'})
+    .then( (resp) => { return resp.json() })
+    .then( (obj) => {
+      var chart = charts[api];
+      switch (api) {
+        case "cpu":
+          var cpu = obj.cpu;
+          appendDataTo(chart.chart.config.data.datasets, "CPU-idle", counter, cpu.idle);
+          appendDataTo(chart.chart.config.data.datasets, "CPU-user", counter, cpu.user);
+          appendDataTo(chart.chart.config.data.datasets, "CPU-system", counter, cpu.system);
+          break;
+        case "mem":
+          var mem;
+          if (typeof obj.MemAvailable === "undefined"){
+            mem = obj.free
+          }else {
+            mem = obj.MemAvailable
+          }//end if
+          appendDataTo(chart.chart.config.data.datasets, "MEM-free", counter, mem);
+          break;
+        case "net":
+          var netI, netO;
+          if (typeof obj.enp0s3 === "undefined" ) {
+            netI = obj.en0.i;
+            netO = obj.en0.o;
+          }else{
+            netI = obj.enp0s3.i;
+            netO = obj.enp0s3.o;
+          }//end if
+          appendDataTo(chart.chart.config.data.datasets, "NET-recv", counter, netI);
+          appendDataTo(chart.chart.config.data.datasets, "NET-send", counter, netO);
+          break;
+        default:
+          var diskW, diskR;
+          if (typeof obj.sda === "undefined") {
+            diskW = obj.disk0.bytes_written;
+            diskR = obj.disk0.bytes_read;
+          }else {
+            diskW = obj.sda.writes_completed;
+            diskR = obj.sda.reads_completed;
+          }//end if
+          appendDataTo(chart.chart.config.data.datasets, "DISK-read", counter, diskR);
+          appendDataTo(chart.chart.config.data.datasets, "DISK-write", counter, diskW);
+      }//end switch
+      chart.update();
+    });
+  }//end function
+  function updateAll() {
+    counter += 1;
+    metrics.forEach( (api) => update(api) );
+  }//end function
+  window.setInterval(updateAll, 1000);
+  </script>
+</body>
+</html>
