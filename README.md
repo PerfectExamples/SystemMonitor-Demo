@@ -71,44 +71,107 @@ This project is based on Perfect Template. If you are not familiar with Perfect 
 
 ### API Routes
 
-This server contains two routes, `/{device}` for mapping API of `/cpu`, `/mem`, `/net` and `/ios` for disk I/O. `/**` is actually mapping to `/index.html` as homepage.
+This server contains two routes, `/api` for server JSON query of real time polling. `/**` is actually mapping to `/index.html` as homepage.
 
 ``` swift
 
 "routes":[
-  ["method":"get", "uri":"/{device}", "handler":handler],
+  ["method":"get", "uri":"/api", "handler":handler],
   ["method":"get", "uri":"/**", "handler":PerfectHTTPServer.HTTPHandler.staticFiles,
    "documentRoot":"./webroot"]
 ]
 ```
 
-### Request / Response Handler
+### System Information
 
-Once got the request, the server will parse out the actual api by calling `req.urlVariables["device"]`, then try to pull out actual info from `SysInfo.XXX`, translate this dictionary and send it back to the client as JSON string. Please note the different calling between mac / linux, which mainly focus on avoiding unnecessary dictionary caching in macOS.
+Considering that `SysInfo` has a rich set of system information so it is necessary to pick up those info which is really needed.
+
+The following code filters out a few basic metrics to monitor and translate into a JSON string. Please note the OS differences:
+
+- CPU usage: average idle time, system time and user time, in percentage.
+- Free memory
+- Network I/O
+- Disk I/O
+
 
 ``` swift
 
-var report = ""
-let function = req.urlVariables["device"] ?? ""
-switch function {
-case "cpu":
-  #if os(Linux)
-    report = try SysInfo.CPU.jsonEncodedString()
-  #else
-    try autoreleasepool(invoking: {
-      report = try SysInfo.CPU.jsonEncodedString()
-    })
-  #endif
+extension SysInfo {
+  static var express: String? {
+    get {
+      #if os(Linux)
+        guard
+          let cpu = SysInfo.CPU["cpu"],
+          let mem = SysInfo.Memory["MemAvailable"],
+          let net = SysInfo.Net["enp0s3"],
+          let dsk = SysInfo.Disk["sda"],
+          let wr = dsk["writes_completed"],
+          let rd = dsk["reads_completed"]
+          else {
+            return nil
+        }
+      #else
+        guard
+          let cpu = SysInfo.CPU["cpu"],
+          let mem = SysInfo.Memory["free"],
+          let net = SysInfo.Net["en0"],
+          let dsk = SysInfo.Disk["disk0"],
+          let wr = dsk["bytes_written"],
+          let rd = dsk["bytes_read"]
+          else {
+            return nil
+        }
+      #endif
+      guard
+        let idl = cpu["idle"],
+        let user = cpu["user"],
+        let system = cpu["system"],
+        let nice = cpu["nice"],
+        let rcv = net["i"],
+        let snd = net["o"]
+        else {
+          return nil
+      }
 
-// then deal with mem / net and disk io ....
-default:
-  res.status = .notFound
-  res.completed()
-  return
+      let total = (idl + user + system + nice) / 100
+      let idle =  idl / total
+      let usr = user / total
+      let sys = system / total
+      let MB = UInt64(1048576)
+      let report : [String: Int]
+          = ["idle": idle, "usr": usr, "sys": sys, "free": mem,
+             "rcv": rcv, "snd": snd,
+             "rd": Int(rd / MB), "wr": Int(wr / MB)]
+      do {
+        return try report.jsonEncodedString()
+      }catch {
+        return nil
+      }//end do
+    }
+  }
 }
-res.setHeader(.contentType, value: "text/json")
-.appendBody(string: report)
-.completed()
+
+```
+
+### Request / Response Handler
+
+Once got the request, the server will immediately send back the JSON:
+
+``` swift
+
+func handler(data: [String:Any]) throws -> RequestHandler {
+	return {
+		_ , res in
+    guard let report = SysInfo.express else {
+      res.status = .badGateway
+      res.completed()
+      return
+    }//end
+		res.setHeader(.contentType, value: "text/json")
+    .appendBody(string: report)
+    .completed()
+	}
+}
 
 ```
 
@@ -117,6 +180,7 @@ res.setHeader(.contentType, value: "text/json")
 The homepage is very simple: use `promises` to download the data and render it by a certain chart framework, such as `ChartJS`:
 
 ``` javascript
+
 /// setup a chart
 function setup(api) {
   var ctx = document.getElementById(api).getContext("2d");
@@ -134,24 +198,44 @@ function setup(api) {
   });
 }//end setup
 
-/// pull data from server api by promises, decode JSON and render in chart
-function update(api){
-  fetch(url(api),{method: 'get'})
+/// polling data from server api by promises, decode JSON and render in chart
+function update(){
+  fetch('http://' + window.location.host + '/api',{method: 'get'})
   .then( (resp) => { return resp.json() })
   .then( (obj) => {
-    var chart = charts[api];
-    switch (api) {
-      case "cpu":
-        var cpu = obj.cpu;
-        appendDataTo(chart.chart.config.data.datasets, "CPU-idle", counter, cpu.idle);
-        appendDataTo(chart.chart.config.data.datasets, "CPU-user", counter, cpu.user);
-        appendDataTo(chart.chart.config.data.datasets, "CPU-system", counter, cpu.system);
-        break;
-        // other counters ...
-    }//end switch
+
+    var chart = charts["cpu"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "CPU-idle", counter, obj.idle);
+    appendDataTo(dset, "CPU-user", counter, obj.usr);
+    appendDataTo(dset, "CPU-system", counter, obj.sys);
     chart.update();
+
+    var chart = charts["mem"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "MEM-free", counter, obj.free);
+    chart.update();
+
+    var chart = charts["net"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "NET-recv", counter, obj.rcv);
+    appendDataTo(dset, "NET-snd", counter, obj.snd);
+    chart.update();
+
+    var chart = charts["ios"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "DISK-read", counter, obj.rd);
+    appendDataTo(dset, "DISK-write", counter, obj.wr);
+    chart.update();
+
+    counter += 1;
+
   });
 }//end function
+
+/// repeatedly polling data every second
+window.setInterval(update, 1000);
+
 ```
 
 ## Issues

@@ -69,44 +69,107 @@ $ ./.build/debug/SystemMonitor
 
 ### 接口函数路由
 
-本服务器包含两个基本路由，一个是`/{device}`，用于映射具体的函数接口`/cpu`（中央处理器）、`/mem`（内存）、`/net`（网络和`/ios`（磁盘读写）。而`/**`则实际上就是映射了`index.html`作为主页。
+本服务器包含两个基本路由，一个是`/api`，用于读取服务器的JSON实时报告，而`/**`则实际上就是映射了`index.html`作为主页。
 
 ``` swift
 
 "routes":[
-  ["method":"get", "uri":"/{device}", "handler":handler],
+  ["method":"get", "uri":"/api", "handler":handler],
   ["method":"get", "uri":"/**", "handler":PerfectHTTPServer.HTTPHandler.staticFiles,
    "documentRoot":"./webroot"]
 ]
 ```
 
-### 请求/响应 处理器
+### 系统信息
 
-收到请求后，服务器会解析具体的接口请求，然后从`SysInfo.XXX`类对象中读取实际的实时信息，再进行json打包、发回给客户端。这里请注意 mac / linux 写法有差异，主要是在macOS上要避免没有必要的字典类数据缓存堆积。
+考虑到 `SysInfo` 能够提供的系统指标非常丰富，因此有必要只选择需要的指标进行监控。
+
+下列代码过滤出了少量用于监控的指标，并转换为一个JSON字符串。请注意操作系统的差异：
+
+- CPU 用量: 平均空闲事件、系统占用和用户占用，所有指标为百分比
+- 空闲内存数量
+- 网络吞吐量
+- 磁盘吞吐量
+
 
 ``` swift
 
-var report = ""
-let function = req.urlVariables["device"] ?? ""
-switch function {
-case "cpu":
-  #if os(Linux)
-    report = try SysInfo.CPU.jsonEncodedString()
-  #else
-    try autoreleasepool(invoking: {
-      report = try SysInfo.CPU.jsonEncodedString()
-    })
-  #endif
+extension SysInfo {
+  static var express: String? {
+    get {
+      #if os(Linux)
+        guard
+          let cpu = SysInfo.CPU["cpu"],
+          let mem = SysInfo.Memory["MemAvailable"],
+          let net = SysInfo.Net["enp0s3"],
+          let dsk = SysInfo.Disk["sda"],
+          let wr = dsk["writes_completed"],
+          let rd = dsk["reads_completed"]
+          else {
+            return nil
+        }
+      #else
+        guard
+          let cpu = SysInfo.CPU["cpu"],
+          let mem = SysInfo.Memory["free"],
+          let net = SysInfo.Net["en0"],
+          let dsk = SysInfo.Disk["disk0"],
+          let wr = dsk["bytes_written"],
+          let rd = dsk["bytes_read"]
+          else {
+            return nil
+        }
+      #endif
+      guard
+        let idl = cpu["idle"],
+        let user = cpu["user"],
+        let system = cpu["system"],
+        let nice = cpu["nice"],
+        let rcv = net["i"],
+        let snd = net["o"]
+        else {
+          return nil
+      }
 
-// then deal with mem / net and disk io ....
-default:
-  res.status = .notFound
-  res.completed()
-  return
+      let total = (idl + user + system + nice) / 100
+      let idle =  idl / total
+      let usr = user / total
+      let sys = system / total
+      let MB = UInt64(1048576)
+      let report : [String: Int]
+          = ["idle": idle, "usr": usr, "sys": sys, "free": mem,
+             "rcv": rcv, "snd": snd,
+             "rd": Int(rd / MB), "wr": Int(wr / MB)]
+      do {
+        return try report.jsonEncodedString()
+      }catch {
+        return nil
+      }//end do
+    }
+  }
 }
-res.setHeader(.contentType, value: "text/json")
-.appendBody(string: report)
-.completed()
+
+```
+
+### 请求/响应 处理器
+
+收到请求后，服务器立刻将系统信息的JSON字符串发回给客户：
+
+``` swift
+
+func handler(data: [String:Any]) throws -> RequestHandler {
+	return {
+		_ , res in
+    guard let report = SysInfo.express else {
+      res.status = .badGateway
+      res.completed()
+      return
+    }//end
+		res.setHeader(.contentType, value: "text/json")
+    .appendBody(string: report)
+    .completed()
+	}
+}
 
 ```
 
@@ -133,23 +196,43 @@ function setup(api) {
 }//end setup
 
 /// 从服务器下拉实时数据，JSON解码并在图表中渲染
-function update(api){
-  fetch(url(api),{method: 'get'})
+function update(){
+  fetch('http://' + window.location.host + '/api',{method: 'get'})
   .then( (resp) => { return resp.json() })
   .then( (obj) => {
-    var chart = charts[api];
-    switch (api) {
-      case "cpu":
-        var cpu = obj.cpu;
-        appendDataTo(chart.chart.config.data.datasets, "CPU-idle", counter, cpu.idle);
-        appendDataTo(chart.chart.config.data.datasets, "CPU-user", counter, cpu.user);
-        appendDataTo(chart.chart.config.data.datasets, "CPU-system", counter, cpu.system);
-        break;
-        // other counters ...
-    }//end switch
+
+    var chart = charts["cpu"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "CPU-idle", counter, obj.idle);
+    appendDataTo(dset, "CPU-user", counter, obj.usr);
+    appendDataTo(dset, "CPU-system", counter, obj.sys);
     chart.update();
+
+    var chart = charts["mem"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "MEM-free", counter, obj.free);
+    chart.update();
+
+    var chart = charts["net"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "NET-recv", counter, obj.rcv);
+    appendDataTo(dset, "NET-snd", counter, obj.snd);
+    chart.update();
+
+    var chart = charts["ios"];
+    var dset = chart.chart.config.data.datasets;
+    appendDataTo(dset, "DISK-read", counter, obj.rd);
+    appendDataTo(dset, "DISK-write", counter, obj.wr);
+    chart.update();
+
+    counter += 1;
+
   });
 }//end function
+
+/// repeatedly polling data every second
+window.setInterval(update, 1000);
+
 ```
 
 ### 问题报告、内容贡献和客户支持
