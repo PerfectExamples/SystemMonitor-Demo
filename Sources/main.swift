@@ -28,6 +28,12 @@ import CoreFoundation
 #endif
 
 extension SysInfo {
+
+  static var lastIdle = -1
+  static var lastUser = -1
+  static var lastSystem = -1
+  static var lastNice = -1
+
   static var express: String? {
     get {
       #if os(Linux)
@@ -54,20 +60,33 @@ extension SysInfo {
         }
       #endif
       guard
-        let idl = cpu["idle"],
-        let user = cpu["user"],
-        let system = cpu["system"],
-        let nice = cpu["nice"],
+        let idle0 = cpu["idle"],
+        let user0 = cpu["user"],
+        let system0 = cpu["system"],
+        let nice0 = cpu["nice"],
         let rcv = net["i"],
         let snd = net["o"]
         else {
           return nil
       }
 
-      let total = (idl + user + system + nice) / 100
-      let idle =  idl / total
-      let usr = user / total
-      let sys = system / total
+      if lastIdle < 0 {
+        lastIdle = idle0
+        lastUser = user0
+        lastSystem = system0
+        lastNice = nice0
+        return nil
+      }//end if
+
+      let idle = idle0 - lastIdle
+      let usr = user0 - lastUser
+      let sys = system0 - lastSystem
+
+      lastIdle = idle0
+      lastUser = user0
+      lastSystem = system0
+      lastNice = nice0
+
       let MB = UInt64(1048576)
       let report : [String: Int]
           = ["idle": idle, "usr": usr, "sys": sys, "free": mem,

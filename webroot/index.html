@@ -40,10 +40,10 @@
     for (var i = 0; i < dataset.length; i++) {
       var item = dataset[i];
       if (item.label == label) {
-        item.data.push({x: key, y: value});
         if (item.data.length > 10) {
           item.data.shift();
         }//end if
+        item.data.push({x: key, y: value});
       }//endif
     }//next
   }//end getIndexOf
